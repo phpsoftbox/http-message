@@ -19,3 +19,10 @@ use PhpSoftBox\Http\Message\ServerRequestCreator;
 $creator = new ServerRequestCreator();
 $request = $creator->fromGlobals();
 ```
+
+## Прокси
+
+`ServerRequestCreator` не учитывает `X-Forwarded-Proto`: заголовок подделывает клиент. За прокси схему, host, порт и
+IP клиента подставляет `TrustedProxyMiddleware` из `phpsoftbox/application` — только для запросов от доверенных
+прокси. Для замены `REMOTE_ADDR` у `ServerRequest` есть `withServerParams()` (вне PSR-7).
+
