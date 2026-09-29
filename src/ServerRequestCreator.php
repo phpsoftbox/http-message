@@ -4,24 +4,28 @@ declare(strict_types=1);
 
 namespace PhpSoftBox\Http\Message;
 
+use InvalidArgumentException;
 use Psr\Http\Message\ServerRequestFactoryInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 use Psr\Http\Message\UploadedFileFactoryInterface;
 use Psr\Http\Message\UploadedFileInterface;
 use Psr\Http\Message\UriFactoryInterface;
+use Psr\Http\Message\UriInterface;
 
 use function array_keys;
-use function explode;
 use function in_array;
 use function is_array;
 use function is_string;
 use function parse_url;
-use function str_contains;
+use function preg_match;
 use function str_replace;
 use function str_starts_with;
+use function strpos;
+use function strrpos;
 use function strtolower;
 use function substr;
+use function trim;
 use function ucwords;
 
 use const UPLOAD_ERR_NO_FILE;
@@ -63,7 +67,12 @@ final readonly class ServerRequestCreator
         $request = $this->serverRequestFactory->createServerRequest($method, $uri, $server);
 
         foreach ($this->marshalHeaders($server) as $name => $values) {
-            $request = $request->withHeader($name, $values);
+            try {
+                $request = $request->withHeader($name, $values);
+            } catch (InvalidArgumentException) {
+                // Заголовок с недопустимым именем или значением пропускается: плохой запрос не должен давать 500.
+                continue;
+            }
         }
 
         $request = $request->withQueryParams($query)->withCookieParams($cookies);
@@ -85,39 +94,113 @@ final readonly class ServerRequestCreator
     /**
      * @param array<string, mixed> $server
      */
-    private function createUriFromGlobals(array $server): Uri
+    private function createUriFromGlobals(array $server): UriInterface
     {
-        $scheme     = $this->detectScheme($server);
-        $hostHeader = (string) ($server['HTTP_HOST'] ?? '');
+        $scheme = $this->detectScheme($server);
 
-        $host = $hostHeader;
-        $port = null;
-        if ($hostHeader !== '' && str_contains($hostHeader, ':')) {
-            [$host, $portStr] = explode(':', $hostHeader, 2);
-            $port             = (int) $portStr;
+        // Порт берётся из Host, если он пришёл: SERVER_PORT за проброшенным портом (docker, балансировщик) описывает
+        // порт внутри, а не тот, к которому обращался клиент. SERVER_NAME и SERVER_PORT — запасной вариант без Host.
+        $authority = $this->parseHostHeader((string) ($server['HTTP_HOST'] ?? ''));
+        if ($authority === null) {
+            $host      = (string) ($server['SERVER_NAME'] ?? $server['SERVER_ADDR'] ?? '');
+            $port      = $this->parsePort((string) ($server['SERVER_PORT'] ?? ''));
+            $authority = [$host, $port];
         }
 
-        if ($host === '') {
-            $host = (string) ($server['SERVER_NAME'] ?? $server['SERVER_ADDR'] ?? '');
+        [$host, $port]  = $authority;
+        [$path, $query] = $this->splitRequestTarget((string) ($server['REQUEST_URI'] ?? '/'));
+        $query ??= (string) ($server['QUERY_STRING'] ?? '');
+
+        $uri = $this->uriFactory->createUri()->withScheme($scheme);
+
+        try {
+            $uri = $uri->withHost($host);
+        } catch (InvalidArgumentException) {
+            // Некорректный host от клиента не должен превращаться в 500: оставляем URI без authority.
+            $port = null;
         }
 
-        if ($port === null && isset($server['SERVER_PORT'])) {
-            $port = (int) $server['SERVER_PORT'];
-        }
-
-        $requestUri = (string) ($server['REQUEST_URI'] ?? '/');
-        $parts      = parse_url($requestUri) ?: [];
-        $path       = (string) ($parts['path'] ?? '/');
-        $query      = (string) ($parts['query'] ?? ($server['QUERY_STRING'] ?? ''));
-
-        $uri = $this->uriFactory->createUri();
-        $uri = $uri->withScheme($scheme)
-            ->withHost($host)
+        return $uri
             ->withPort($this->normalizePort($scheme, $port))
             ->withPath($path)
             ->withQuery($query);
+    }
 
-        return $uri;
+    /**
+     * Разбирает заголовок Host в host и порт. IPv6-адрес указывается в квадратных скобках (`[::1]:8080`);
+     * пустой или некорректный порт (`example.com:`) отбрасывается.
+     *
+     * @return array{0: string, 1: int|null}|null null, если заголовок пустой или не разбирается.
+     */
+    private function parseHostHeader(string $header): ?array
+    {
+        $header = trim($header);
+        if ($header === '') {
+            return null;
+        }
+
+        if (str_starts_with($header, '[')) {
+            $end = strpos($header, ']');
+            if ($end === false) {
+                return null;
+            }
+
+            $host = substr($header, 0, $end + 1);
+            $rest = substr($header, $end + 1);
+            if ($rest !== '' && !str_starts_with($rest, ':')) {
+                return null;
+            }
+
+            return [$host, $this->parsePort(substr($rest, 1))];
+        }
+
+        $colon = strrpos($header, ':');
+        if ($colon === false) {
+            return [$header, null];
+        }
+
+        return [substr($header, 0, $colon), $this->parsePort(substr($header, $colon + 1))];
+    }
+
+    private function parsePort(string $port): ?int
+    {
+        if (preg_match('/^\d{1,5}$/', $port) !== 1) {
+            return null;
+        }
+
+        $number = (int) $port;
+
+        return $number >= 1 && $number <= 65535 ? $number : null;
+    }
+
+    /**
+     * Делит request target на path и query вручную: parse_url() принимает `//evil/x` за authority и теряет часть
+     * пути. Absolute-form (`http://host/path`) разбирается как URI.
+     *
+     * @return array{0: string, 1: string|null} query равен null, если в target нет "?".
+     */
+    private function splitRequestTarget(string $target): array
+    {
+        if (preg_match('#^[a-zA-Z][a-zA-Z0-9+\-.]*://#', $target) === 1) {
+            $parts = parse_url($target);
+            if ($parts !== false) {
+                return [(string) ($parts['path'] ?? '/'), isset($parts['query']) ? (string) $parts['query'] : null];
+            }
+        }
+
+        $fragmentPos = strpos($target, '#');
+        if ($fragmentPos !== false) {
+            $target = substr($target, 0, $fragmentPos);
+        }
+
+        $query    = null;
+        $queryPos = strpos($target, '?');
+        if ($queryPos !== false) {
+            $query  = substr($target, $queryPos + 1);
+            $target = substr($target, 0, $queryPos);
+        }
+
+        return [$target !== '' ? $target : '/', $query];
     }
 
     /**

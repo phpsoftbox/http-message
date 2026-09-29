@@ -10,10 +10,15 @@ use Psr\Http\Message\UploadedFileInterface;
 use RuntimeException;
 
 use function fclose;
-use function file_put_contents;
 use function fopen;
-use function is_resource;
-use function stream_copy_to_stream;
+use function fwrite;
+use function is_string;
+use function is_uploaded_file;
+use function move_uploaded_file;
+use function restore_error_handler;
+use function set_error_handler;
+use function sprintf;
+use function strlen;
 
 use const UPLOAD_ERR_EXTENSION;
 use const UPLOAD_ERR_OK;
@@ -25,6 +30,8 @@ final class UploadedFile implements UploadedFileInterface
     private int $error;
     private ?string $clientFilename;
     private ?string $clientMediaType;
+    private const int CHUNK_SIZE = 65_536;
+
     private bool $moved = false;
 
     public function __construct(
@@ -72,23 +79,83 @@ final class UploadedFile implements UploadedFileInterface
             throw new RuntimeException('Cannot move file due to upload error.');
         }
 
-        $resource = $this->stream->detach();
-        if (!is_resource($resource)) {
-            $data = (string) $this->stream;
-            if (file_put_contents($targetPath, $data) === false) {
-                throw new RuntimeException('Unable to write uploaded file.');
-            }
+        $source = $this->stream->getMetadata('uri');
+        if (is_string($source) && $source !== '' && is_uploaded_file($source)) {
+            // Файл загружен через SAPI: переносим его move_uploaded_file(), который проверяет происхождение файла.
+            $this->runWithErrorCapture(
+                static fn (): bool => move_uploaded_file($source, $targetPath),
+                sprintf('Unable to move uploaded file to "%s"', $targetPath),
+            );
+            $this->stream->close();
         } else {
-            $target = fopen($targetPath, 'wb');
-            if ($target === false) {
-                throw new RuntimeException('Unable to open target file.');
-            }
-            stream_copy_to_stream($resource, $target);
-            fclose($target);
-            fclose($resource);
+            $this->copyStreamTo($targetPath);
         }
 
         $this->moved = true;
+    }
+
+    /**
+     * Копирует содержимое stream в файл и проверяет, что запись прошла полностью.
+     *
+     * @throws RuntimeException Если целевой файл не открылся или запись не удалась.
+     */
+    private function copyStreamTo(string $targetPath): void
+    {
+        $target = $this->runWithErrorCapture(
+            static fn (): mixed => fopen($targetPath, 'wb'),
+            sprintf('Unable to open target file "%s"', $targetPath),
+        );
+
+        try {
+            if ($this->stream->isSeekable()) {
+                $this->stream->rewind();
+            }
+
+            while (!$this->stream->eof()) {
+                $chunk = $this->stream->read(self::CHUNK_SIZE);
+                if ($chunk === '') {
+                    continue;
+                }
+
+                $this->runWithErrorCapture(
+                    static fn (): mixed => fwrite($target, $chunk) === strlen($chunk),
+                    sprintf('Unable to write uploaded file to "%s"', $targetPath),
+                );
+            }
+        } finally {
+            fclose($target);
+        }
+
+        $this->stream->close();
+    }
+
+    /**
+     * Выполняет файловую операцию и превращает результат false или предупреждение PHP в RuntimeException.
+     *
+     * @template T
+     * @param callable(): T $operation
+     * @return T
+     */
+    private function runWithErrorCapture(callable $operation, string $message): mixed
+    {
+        $error = '';
+        set_error_handler(static function (int $errno, string $warning) use (&$error): bool {
+            $error = $warning;
+
+            return true;
+        });
+
+        try {
+            $result = $operation();
+        } finally {
+            restore_error_handler();
+        }
+
+        if ($result === false) {
+            throw new RuntimeException($error !== '' ? $message . ': ' . $error : $message . '.');
+        }
+
+        return $result;
     }
 
     public function getSize(): ?int

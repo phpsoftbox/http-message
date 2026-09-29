@@ -164,7 +164,8 @@ final class ServerRequest extends Request implements ServerRequestInterface
 
     public function getAttribute(string $name, $default = null): mixed
     {
-        return $this->attributes[$name] ?? $default;
+        // array_key_exists, а не ??: сохранённый null возвращается как есть, а не подменяется default.
+        return array_key_exists($name, $this->attributes) ? $this->attributes[$name] : $default;
     }
 
     public function withAttribute(string $name, $value): static
