@@ -9,12 +9,12 @@ use Psr\Http\Message\MessageInterface;
 use Psr\Http\Message\StreamInterface;
 
 use function array_key_exists;
-use function array_map;
 use function array_merge;
 use function array_values;
 use function implode;
 use function is_array;
-use function is_numeric;
+use function is_float;
+use function is_int;
 use function is_string;
 use function preg_match;
 use function strtolower;
@@ -22,6 +22,11 @@ use function trim;
 
 abstract class Message implements MessageInterface
 {
+    /**
+     * Метод и имя заголовка — token из RFC 7230: один или несколько tchar.
+     */
+    protected const string TOKEN_PATTERN = '/^[!#$%&\'*+\-.^_`|~0-9A-Za-z]+$/';
+
     protected string $protocolVersion = '1.1';
 
     /** @var array<string, string[]> */
@@ -65,9 +70,7 @@ abstract class Message implements MessageInterface
 
     public function hasHeader(string $name): bool
     {
-        $normalized = $this->normalizeHeaderName($name);
-
-        return isset($this->headerNames[$normalized]);
+        return isset($this->headerNames[strtolower($name)]);
     }
 
     /**
@@ -75,8 +78,7 @@ abstract class Message implements MessageInterface
      */
     public function getHeader(string $name): array
     {
-        $normalized = $this->normalizeHeaderName($name);
-        $key        = $this->headerNames[$normalized] ?? null;
+        $key = $this->headerNames[strtolower($name)] ?? null;
 
         if ($key === null) {
             return [];
@@ -111,7 +113,7 @@ abstract class Message implements MessageInterface
     public function withoutHeader(string $name): static
     {
         $clone      = clone $this;
-        $normalized = $this->normalizeHeaderName($name);
+        $normalized = strtolower($name);
         $key        = $clone->headerNames[$normalized] ?? null;
         if ($key === null) {
             return $clone;
@@ -145,7 +147,7 @@ abstract class Message implements MessageInterface
         }
     }
 
-    private function setHeader(string $name, $value, bool $replace): void
+    private function setHeader(string $name, mixed $value, bool $replace): void
     {
         $normalized = $this->normalizeHeaderName($name);
         $values     = $this->normalizeHeaderValue($value);
@@ -160,14 +162,18 @@ abstract class Message implements MessageInterface
         $this->headerNames[$normalized] = $key;
     }
 
-    private function normalizeHeaderName(string $name): string
+    /**
+     * Проверяет имя заголовка по грамматике token из RFC 7230 и возвращает его в нижнем регистре.
+     *
+     * @throws InvalidArgumentException Если имя пустое или содержит недопустимые символы.
+     */
+    protected function normalizeHeaderName(string $name): string
     {
-        $name = trim($name);
         if ($name === '') {
             throw new InvalidArgumentException('Header name must not be empty.');
         }
 
-        if (preg_match('/[^a-zA-Z0-9\-\_]/', $name) === 1) {
+        if (preg_match(self::TOKEN_PATTERN, $name) !== 1) {
             throw new InvalidArgumentException('Header name contains invalid characters.');
         }
 
@@ -175,18 +181,42 @@ abstract class Message implements MessageInterface
     }
 
     /**
+     * Проверяет значение заголовка по грамматике field-value из RFC 7230: переводы строк, NUL и другие управляющие
+     * символы, кроме горизонтальной табуляции, запрещены. Пробелы и табуляция по краям значения удаляются.
+     *
+     * @throws InvalidArgumentException Если значение содержит недопустимые символы.
+     */
+    protected function assertHeaderValue(string $value): string
+    {
+        if (preg_match('/^[\x09\x20-\x7E\x80-\xFF]*$/', $value) !== 1) {
+            throw new InvalidArgumentException('Header value contains invalid characters.');
+        }
+
+        return trim($value, " \t");
+    }
+
+    /**
      * @return string[]
      */
-    private function normalizeHeaderValue($value): array
+    private function normalizeHeaderValue(mixed $value): array
     {
-        if (is_array($value)) {
-            return array_map(static fn ($v) => (string) $v, $value);
+        if (!is_array($value)) {
+            $value = [$value];
         }
 
-        if (!is_string($value) && $value !== null && !is_numeric($value)) {
-            throw new InvalidArgumentException('Header value must be a string or array of strings.');
+        if ($value === []) {
+            throw new InvalidArgumentException('Header value must not be an empty array.');
         }
 
-        return [(string) $value];
+        $normalized = [];
+        foreach ($value as $item) {
+            if (!is_string($item) && !is_int($item) && !is_float($item)) {
+                throw new InvalidArgumentException('Header value must be a string, a number or an array of them.');
+            }
+
+            $normalized[] = $this->assertHeaderValue((string) $item);
+        }
+
+        return $normalized;
     }
 }

@@ -6,6 +6,7 @@ namespace PhpSoftBox\Http\Message\Tests;
 
 use PhpSoftBox\Http\Message\ServerRequest;
 use PhpSoftBox\Http\Message\Uri;
+use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
 final class ServerRequestTest extends TestCase
@@ -58,5 +59,21 @@ final class ServerRequestTest extends TestCase
         $modified = $request->withUri(new Uri('/local'));
 
         $this->assertSame('', $modified->getHeaderLine('Host'));
+    }
+
+    /**
+     * Проверим, что withServerParams() возвращает копию с новыми server params и не меняет исходный запрос.
+     *
+     * @see ServerRequest::withServerParams()
+     */
+    #[Test]
+    public function withServerParamsReturnsModifiedCopy(): void
+    {
+        $request = new ServerRequest('GET', 'https://example.com/', serverParams: ['REMOTE_ADDR' => '10.0.0.1']);
+
+        $changed = $request->withServerParams(['REMOTE_ADDR' => '198.51.100.20']);
+
+        self::assertSame('10.0.0.1', $request->getServerParams()['REMOTE_ADDR']);
+        self::assertSame('198.51.100.20', $changed->getServerParams()['REMOTE_ADDR']);
     }
 }

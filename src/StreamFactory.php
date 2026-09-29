@@ -7,9 +7,14 @@ namespace PhpSoftBox\Http\Message;
 use InvalidArgumentException;
 use Psr\Http\Message\StreamFactoryInterface;
 use Psr\Http\Message\StreamInterface;
+use RuntimeException;
 
 use function fopen;
 use function is_resource;
+use function preg_match;
+use function restore_error_handler;
+use function set_error_handler;
+use function sprintf;
 
 final class StreamFactory implements StreamFactoryInterface
 {
@@ -18,11 +23,31 @@ final class StreamFactory implements StreamFactoryInterface
         return new Stream($content);
     }
 
+    /**
+     * @throws InvalidArgumentException Если режим открытия недопустим.
+     * @throws RuntimeException Если файл не удалось открыть.
+     */
     public function createStreamFromFile(string $filename, string $mode = 'r'): StreamInterface
     {
-        $resource = fopen($filename, $mode);
+        if (preg_match('/^[rwaxc][bte]*\+?[bte]*$/', $mode) !== 1) {
+            throw new InvalidArgumentException(sprintf('Invalid file open mode "%s".', $mode));
+        }
+
+        $error = '';
+        set_error_handler(static function (int $errno, string $message) use (&$error): bool {
+            $error = $message;
+
+            return true;
+        });
+
+        try {
+            $resource = fopen($filename, $mode);
+        } finally {
+            restore_error_handler();
+        }
+
         if ($resource === false) {
-            throw new InvalidArgumentException('Unable to open file for stream.');
+            throw new RuntimeException(sprintf('Unable to open file "%s": %s', $filename, $error));
         }
 
         return new Stream($resource);

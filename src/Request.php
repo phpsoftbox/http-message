@@ -10,7 +10,7 @@ use Psr\Http\Message\StreamInterface;
 use Psr\Http\Message\UriInterface;
 
 use function is_string;
-use function strtoupper;
+use function preg_match;
 
 class Request extends Message implements RequestInterface
 {
@@ -29,7 +29,7 @@ class Request extends Message implements RequestInterface
         $body = null,
         string $protocolVersion = '1.1',
     ) {
-        $this->method = strtoupper($method);
+        $this->method = $this->filterMethod($method);
         $this->uri    = is_string($uri) ? new Uri($uri) : $uri;
 
         $stream = $body instanceof StreamInterface ? $body : new Stream($body);
@@ -66,6 +66,10 @@ class Request extends Message implements RequestInterface
             throw new InvalidArgumentException('Request target must not be empty.');
         }
 
+        if (preg_match('/\s/', $requestTarget) === 1) {
+            throw new InvalidArgumentException('Request target must not contain whitespace.');
+        }
+
         $clone                = clone $this;
         $clone->requestTarget = $requestTarget;
 
@@ -80,7 +84,7 @@ class Request extends Message implements RequestInterface
     public function withMethod(string $method): static
     {
         $clone         = clone $this;
-        $clone->method = strtoupper($method);
+        $clone->method = $this->filterMethod($method);
 
         return $clone;
     }
@@ -112,6 +116,20 @@ class Request extends Message implements RequestInterface
         return $clone;
     }
 
+    /**
+     * Метод по PSR-7 регистрозависим и сохраняется как передан; допустим только token из RFC 7230.
+     *
+     * @throws InvalidArgumentException Если метод пустой или содержит недопустимые символы.
+     */
+    private function filterMethod(string $method): string
+    {
+        if (preg_match(self::TOKEN_PATTERN, $method) !== 1) {
+            throw new InvalidArgumentException('HTTP method must be a non-empty token.');
+        }
+
+        return $method;
+    }
+
     private function setHostFromUri(UriInterface $uri): void
     {
         $host = $uri->getHost();
@@ -123,7 +141,12 @@ class Request extends Message implements RequestInterface
             $host .= ':' . $uri->getPort();
         }
 
-        $this->headers['Host']     = [$host];
+        $existing = $this->headerNames['host'] ?? null;
+        if ($existing !== null) {
+            unset($this->headers[$existing]);
+        }
+
+        $this->headers['Host']     = [$this->assertHeaderValue($host)];
         $this->headerNames['host'] = 'Host';
     }
 }

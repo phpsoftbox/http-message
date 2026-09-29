@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpSoftBox\Http\Message\Tests;
 
 use PhpSoftBox\Http\Message\ServerRequestCreator;
+use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\UploadedFileInterface;
 
@@ -74,5 +75,23 @@ final class ServerRequestCreatorTest extends TestCase
         $this->assertInstanceOf(UploadedFileInterface::class, $uploaded);
 
         unlink($tmp);
+    }
+
+    /**
+     * Проверим, что X-Forwarded-Proto из запроса не меняет схему: его учитывает только middleware доверенных прокси.
+     *
+     * @see ServerRequestCreator::fromGlobals()
+     */
+    #[Test]
+    public function ignoresForwardedProto(): void
+    {
+        $request = new ServerRequestCreator()->fromGlobals([
+            'REQUEST_METHOD'         => 'GET',
+            'REQUEST_URI'            => '/login',
+            'SERVER_NAME'            => 'example.com',
+            'HTTP_X_FORWARDED_PROTO' => 'https',
+        ], [], [], [], []);
+
+        self::assertSame('http', $request->getUri()->getScheme());
     }
 }
