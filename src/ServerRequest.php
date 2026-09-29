@@ -71,6 +71,20 @@ final class ServerRequest extends Request implements ServerRequestInterface
     }
 
     /**
+     * Заменяет server params. Не входит в PSR-7: нужен middleware доверенных прокси, который подставляет в
+     * `REMOTE_ADDR` реальный IP клиента.
+     *
+     * @param array<string, mixed> $serverParams
+     */
+    public function withServerParams(array $serverParams): static
+    {
+        $clone               = clone $this;
+        $clone->serverParams = $serverParams;
+
+        return $clone;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function getCookieParams(): array

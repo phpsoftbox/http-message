@@ -22,7 +22,6 @@ use function str_replace;
 use function str_starts_with;
 use function strtolower;
 use function substr;
-use function trim;
 use function ucwords;
 
 use const UPLOAD_ERR_NO_FILE;
@@ -136,13 +135,8 @@ final readonly class ServerRequestCreator
             return strtolower($scheme);
         }
 
-        $forwarded = $server['HTTP_X_FORWARDED_PROTO'] ?? null;
-        if (is_string($forwarded) && $forwarded !== '') {
-            $parts = explode(',', $forwarded, 2);
-
-            return strtolower(trim($parts[0]));
-        }
-
+        // X-Forwarded-Proto здесь не учитывается: его подделывает клиент. За прокси схему подставляет middleware
+        // доверенных прокси, только если запрос пришёл от прокси из списка.
         return 'http';
     }
 
